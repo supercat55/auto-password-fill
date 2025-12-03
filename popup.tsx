@@ -1,20 +1,17 @@
+import { CaretRightOutlined } from "@ant-design/icons"
 import {
   Button,
-  Card,
+  Collapse,
   ConfigProvider,
-  Divider,
   Empty,
   Flex,
   message,
-  Popconfirm,
-  Space,
-  Tag,
-  Tooltip,
-  Typography
+  Tag
 } from "antd"
 import { useEffect, useRef, useState } from "react"
 
 import { AccountDrawer, type AccountDrawerRef } from "~modules/AccountDrawer"
+import { DomainCard } from "~modules/DomainCard"
 import { DomainModal, type DomainModalRef } from "~modules/DomainModal"
 import { SelectorModal, type SelectorModalRef } from "~modules/SelectorModal"
 import type { Account, DomainConfig, DomainWithAccounts } from "~types"
@@ -37,16 +34,49 @@ function IndexPopup() {
   const [currentDomain, setCurrentDomain] = useState("")
   const accountDrawerRef = useRef<AccountDrawerRef>(null)
   const selectorModalRef = useRef<SelectorModalRef>(null)
+  const [activeKeys, setActiveKeys] = useState<string[]>([])
+
+  // 检查域名是否匹配当前域名（使用与 findDomainConfigByDomain 相同的逻辑）
+  const isCurrentDomain = (domain: string) => {
+    if (!currentDomain) return false
+    if (domain === currentDomain) return true
+    // 支持通配符匹配，如 *.example.com
+    const pattern = domain.replace(/\./g, "\\.").replace(/\*/g, ".*")
+    const regex = new RegExp(`^${pattern}$`)
+    return regex.test(currentDomain)
+  }
 
   const loadData = async () => {
     const data = await getDomainsWithAccounts()
     console.log("🚀 ~ loadData ~ data:", data)
     setDomainsWithAccounts(data)
+
+    // 设置默认展开的 key（其他域名配置的折叠面板）
+    const hasOtherDomains = data.some(
+      ({ config }) => !isCurrentDomain(config.domain)
+    )
+    if (hasOtherDomains) {
+      setActiveKeys(["other-domains"])
+    } else {
+      setActiveKeys([])
+    }
   }
 
   useEffect(() => {
     loadData()
   }, [])
+
+  // 当 currentDomain 变化时，更新展开的 key
+  useEffect(() => {
+    const hasOtherDomains = domainsWithAccounts.some(
+      ({ config }) => !isCurrentDomain(config.domain)
+    )
+    if (hasOtherDomains) {
+      setActiveKeys(["other-domains"])
+    } else {
+      setActiveKeys([])
+    }
+  }, [currentDomain, domainsWithAccounts])
 
   // 获取当前标签页的域名
   useEffect(() => {
@@ -161,49 +191,42 @@ function IndexPopup() {
     }
   }
 
-  const renderDomainCardTitle = (config: DomainConfig) => {
-    return (
-      <div className="py-1">
-        <Tooltip title={config.alias || config.domain}>
-          <Typography.Text
-            strong
-            className="text-base"
-            ellipsis
-            style={{ maxWidth: "200px", display: "block" }}>
-            {config.alias || config.domain}
-          </Typography.Text>
-        </Tooltip>
-        {config.alias && (
-          <Tooltip title={config.domain}>
-            <Typography.Text
-              type="secondary"
-              className="text-xs block mt-0.5"
-              ellipsis
-              style={{ maxWidth: "200px" }}>
-              {config.domain}
-            </Typography.Text>
-          </Tooltip>
-        )}
-        <div className="flex items-center gap-2 mt-1 flex-wrap">
-          <Tag color="default">{config.selectors?.length || 0} 个选择器</Tag>
-          {config.selectors && config.selectors.length > 0 && (
-            <Space size={4} wrap>
-              {config.selectors.map((selector, idx) => (
-                <Tag
-                  key={selector.id || idx}
-                  color={selector.selectorType === "css" ? "blue" : "purple"}
-                  className="text-xs">
-                  {selector.alias || `选择器${idx + 1}`}
-                </Tag>
-              ))}
-            </Space>
-          )}
-        </div>
-      </div>
-    )
+  // 跳转到域名对应的网址
+  const handleNavigateToDomain = (domain: string) => {
+    try {
+      // 处理通配符域名，如 *.example.com -> example.com
+      let targetDomain = domain
+      if (domain.startsWith("*.")) {
+        targetDomain = domain.substring(2)
+      } else if (domain.includes("*")) {
+        // 处理其他通配符情况，提取主域名
+        const parts = domain.split(".")
+        const mainDomain = parts.filter((p) => p !== "*").join(".")
+        targetDomain = mainDomain || domain
+      }
+
+      // 构建完整的 URL
+      let url = targetDomain
+      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        url = `https://${url}`
+      }
+
+      // 使用 chrome.tabs.create 在新标签页打开
+      chrome.tabs.create({ url })
+    } catch (error) {
+      console.error("打开网址失败:", error)
+      message.error("无法打开网址，请检查域名格式")
+    }
   }
 
-  //TODO:折叠功能 优先展示匹配的域名
+  // 分离匹配的域名配置和其他域名配置
+  const matchedDomain = domainsWithAccounts.find(({ config }) =>
+    isCurrentDomain(config.domain)
+  )
+  const otherDomains = domainsWithAccounts.filter(
+    ({ config }) => !isCurrentDomain(config.domain)
+  )
+
   return (
     <ConfigProvider
       theme={{
@@ -213,152 +236,107 @@ function IndexPopup() {
       }}>
       <div className="w-96 h-[600px] bg-gray-50 flex flex-col">
         <div className="bg-purple-500 p-4 text-white flex-shrink-0">
-          <h1 className="text-2xl font-bold">
-            {currentDomain || "未检测到域名"}
-          </h1>
+          {matchedDomain ? (
+            <h1 className="text-xl font-bold">
+              {matchedDomain.config.alias ||
+                matchedDomain.config.domain ||
+                "未检测到域名"}
+            </h1>
+          ) : (
+            <Button
+              type="primary"
+              size="large"
+              block
+              onClick={handleAddDomain}
+              style={{
+                backgroundColor: "rgba(255, 255, 255, 0.2)",
+                borderColor: "rgba(255, 255, 255, 0.3)",
+                color: "white",
+                fontWeight: "bold"
+              }}>
+              + 添加域名
+            </Button>
+          )}
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-3">
           {domainsWithAccounts.length > 0 ? (
-            domainsWithAccounts.map(({ config, accounts }) => (
-              <Card
-                key={config.id}
-                title={renderDomainCardTitle(config)}
-                size="small"
-                extra={
-                  <Space size="small">
-                    <Button
-                      type="text"
-                      size="small"
-                      onClick={() => handleEditDomain(config)}>
-                      ⚙️
-                    </Button>
-                    <Popconfirm
-                      title="确定要删除这个域名配置吗？"
-                      description="删除后，该域名下的所有账户也会被删除"
-                      onConfirm={() => handleDeleteDomain(config.id)}
-                      okText="确定"
-                      cancelText="取消">
-                      <Button type="text" size="small">
-                        🗑️
-                      </Button>
-                    </Popconfirm>
-                  </Space>
-                }
-                className="shadow-sm">
-                <div className="space-y-2">
-                  {accounts.length > 0 ? (
-                    accounts.map((account) => (
-                      <div
-                        key={account.id}
-                        className="flex items-start justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors border border-transparent hover:border-gray-200">
-                        <div className="flex-1 min-w-0 mr-3">
-                          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                            <Tooltip
-                              title={
-                                account.label ||
-                                (account.selectorValues &&
-                                  Object.values(account.selectorValues)[0]) ||
-                                "未命名账户"
-                              }>
-                              <Typography.Text
-                                strong
-                                className="text-sm"
-                                ellipsis
-                                style={{ maxWidth: "150px" }}>
-                                {account.label ||
-                                  (account.selectorValues &&
-                                    Object.values(account.selectorValues)[0]) ||
-                                  "未命名账户"}
-                              </Typography.Text>
-                            </Tooltip>
-                            <Space size={4}>
-                              {account.isDefault && (
-                                <Tag color="blue">默认</Tag>
-                              )}
-                              {account.autoFill && (
-                                <Tag color="green">自动</Tag>
-                              )}
-                            </Space>
-                          </div>
-                          {account.selectorValues &&
-                            Object.keys(account.selectorValues).length > 0 && (
-                              <div className="flex flex-wrap gap-1 mt-1">
-                                {Object.entries(account.selectorValues)
-                                  .slice(0, 2)
-                                  .map(([selectorId, value]) => (
-                                    <Tooltip key={selectorId} title={value}>
-                                      <Typography.Text
-                                        type="secondary"
-                                        className="text-xs"
-                                        ellipsis
-                                        style={{
-                                          display: "block",
-                                          maxWidth: "100px"
-                                        }}>
-                                        {value.substring(0, 8)}...
-                                      </Typography.Text>
-                                    </Tooltip>
-                                  ))}
-                              </div>
-                            )}
-                        </div>
-                        <div className="flex gap-1 flex-shrink-0">
-                          <Tooltip title="填充此账户">
-                            <Button
-                              onClick={() => handleFill(account.id)}
-                              size="small"
-                              type="primary">
-                              填充
-                            </Button>
-                          </Tooltip>
-                          {!account.isDefault && (
-                            <Tooltip title="设为默认">
-                              <Button
-                                onClick={() => handleSetDefaultAccount(account)}
-                                size="small">
-                                默认
-                              </Button>
-                            </Tooltip>
-                          )}
-                          <Tooltip title="编辑账户">
-                            <Button
-                              onClick={() =>
-                                handleOpenAccountDrawer(config.id, account)
-                              }
-                              size="small">
-                              编辑
-                            </Button>
-                          </Tooltip>
-                          <Popconfirm
-                            title="确定要删除这个账户吗？"
-                            onConfirm={() => handleDeleteAccount(account.id)}
-                            okText="确定"
-                            cancelText="取消">
-                            <Tooltip title="删除账户">
-                              <Button size="small" danger>
-                                删除
-                              </Button>
-                            </Tooltip>
-                          </Popconfirm>
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="text-center py-4 text-gray-400 text-sm">
-                      暂无账户
-                    </div>
+            <>
+              {/* 匹配的域名配置：单独显示，不折叠 */}
+              {matchedDomain ? (
+                <DomainCard
+                  key={matchedDomain.config.id}
+                  config={matchedDomain.config}
+                  accounts={matchedDomain.accounts}
+                  isCurrentDomain={true}
+                  onNavigate={handleNavigateToDomain}
+                  onEdit={handleEditDomain}
+                  onDelete={handleDeleteDomain}
+                  onFill={handleFill}
+                  onSetDefault={handleSetDefaultAccount}
+                  onEditAccount={handleOpenAccountDrawer}
+                  onDeleteAccount={handleDeleteAccount}
+                  onAddAccount={(configId) => handleOpenAccountDrawer(configId)}
+                />
+              ) : (
+                <Empty
+                  description="当前域名还没有配置"
+                  className="py-8"
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}>
+                  <Button type="primary" onClick={handleAddDomain}>
+                    添加域名
+                  </Button>
+                </Empty>
+              )}
+
+              {/* 其他域名配置：放在折叠面板中 */}
+              {otherDomains.length > 0 && (
+                <Collapse
+                  activeKey={activeKeys}
+                  onChange={setActiveKeys}
+                  bordered={false}
+                  size="small"
+                  expandIcon={({ isActive }) => (
+                    <CaretRightOutlined rotate={isActive ? 90 : 0} />
                   )}
-                </div>
-                <Divider className="my-3" />
-                <Button
-                  type="dashed"
-                  block
-                  onClick={() => handleOpenAccountDrawer(config.id)}
-                  className="text-xs">
-                  + 添加账户
-                </Button>
-              </Card>
-            ))
+                  style={{ padding: "2px" }}
+                  items={[
+                    {
+                      key: "other-domains",
+                      label: (
+                        <span>
+                          其他域名配置{" "}
+                          <Tag color="default" className="ml-2">
+                            {otherDomains.length}
+                          </Tag>
+                        </span>
+                      ),
+                      children: (
+                        <div className="space-y-3">
+                          {otherDomains.map(({ config, accounts }) => (
+                            <DomainCard
+                              key={config.id}
+                              config={config}
+                              accounts={accounts}
+                              isCurrentDomain={false}
+                              onNavigate={handleNavigateToDomain}
+                              onEdit={handleEditDomain}
+                              onDelete={handleDeleteDomain}
+                              onFill={handleFill}
+                              onSetDefault={handleSetDefaultAccount}
+                              onEditAccount={handleOpenAccountDrawer}
+                              onDeleteAccount={handleDeleteAccount}
+                              onAddAccount={(configId) =>
+                                handleOpenAccountDrawer(configId)
+                              }
+                            />
+                          ))}
+                        </div>
+                      )
+                    }
+                  ]}
+                />
+              )}
+            </>
           ) : (
             <Empty
               description="还没有配置任何域名"
@@ -368,14 +346,15 @@ function IndexPopup() {
           )}
         </div>
         <div className="bg-white border-t border-gray-200 flex-shrink-0 shadow-lg p-2">
-          <Flex className="w-full gap-2">
+          {matchedDomain ? (
+            <Button type="primary" block onClick={() => handleFill("")}>
+              一键填充
+            </Button>
+          ) : (
             <Button type="primary" block onClick={handleAddDomain}>
               + 添加域名
             </Button>
-            <Button type="default" block onClick={() => handleFill("")}>
-              立即填充
-            </Button>
-          </Flex>
+          )}
         </div>
       </div>
       <DomainModal
