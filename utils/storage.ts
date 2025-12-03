@@ -138,6 +138,18 @@ async function getStorageData(): Promise<StorageData> {
   return result[STORAGE_KEY] || { domainConfigs: [], accounts: [] }
 }
 
+// 导出存储数据（用于导出 JSON）
+export async function exportStorageData(): Promise<StorageData> {
+  return await getStorageData()
+}
+
+// 导入存储数据（用于导入 JSON）
+export async function importStorageData(data: StorageData): Promise<void> {
+  await chrome.storage.local.set({
+    [STORAGE_KEY]: data
+  })
+}
+
 // 生成唯一ID
 export function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`

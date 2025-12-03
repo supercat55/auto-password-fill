@@ -1,25 +1,38 @@
-import { CaretRightOutlined } from "@ant-design/icons"
+import {
+  CaretRightOutlined,
+  DownloadOutlined,
+  EditOutlined,
+  ImportOutlined
+} from "@ant-design/icons"
 import {
   Button,
   Collapse,
   ConfigProvider,
   Empty,
-  Flex,
   message,
-  Tag
+  Tag,
+  Tooltip
 } from "antd"
 import { useEffect, useRef, useState } from "react"
 
 import { AccountDrawer, type AccountDrawerRef } from "~modules/AccountDrawer"
 import { DomainCard } from "~modules/DomainCard"
 import { DomainModal, type DomainModalRef } from "~modules/DomainModal"
+import { JsonEditorModal } from "~modules/JsonEditorModal"
 import { SelectorModal, type SelectorModalRef } from "~modules/SelectorModal"
-import type { Account, DomainConfig, DomainWithAccounts } from "~types"
+import type {
+  Account,
+  DomainConfig,
+  DomainWithAccounts,
+  StorageData
+} from "~types"
 import {
   deleteAccount,
   deleteDomainConfig,
+  exportStorageData,
   findDomainConfigByDomain,
   getDomainsWithAccounts,
+  importStorageData,
   saveAccount
 } from "~utils/storage"
 
@@ -32,9 +45,16 @@ function IndexPopup() {
 
   const domainModalRef = useRef<DomainModalRef>(null)
   const [currentDomain, setCurrentDomain] = useState("")
+  const [faviconUrl, setFaviconUrl] = useState<string>("")
   const accountDrawerRef = useRef<AccountDrawerRef>(null)
   const selectorModalRef = useRef<SelectorModalRef>(null)
   const [activeKeys, setActiveKeys] = useState<string[]>([])
+  const [jsonEditorOpen, setJsonEditorOpen] = useState(false)
+  const [storageData, setStorageData] = useState<StorageData>({
+    domainConfigs: [],
+    accounts: []
+  })
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // 检查域名是否匹配当前域名（使用与 findDomainConfigByDomain 相同的逻辑）
   const isCurrentDomain = (domain: string) => {
@@ -51,6 +71,10 @@ function IndexPopup() {
     console.log("🚀 ~ loadData ~ data:", data)
     setDomainsWithAccounts(data)
 
+    // 同时加载完整的存储数据
+    const fullData = await exportStorageData()
+    setStorageData(fullData)
+
     // 设置默认展开的 key（其他域名配置的折叠面板）
     const hasOtherDomains = data.some(
       ({ config }) => !isCurrentDomain(config.domain)
@@ -62,11 +86,43 @@ function IndexPopup() {
     }
   }
 
+  // 更新扩展图标角标
+  const updateBadge = (data: DomainWithAccounts[], domain: string) => {
+    if (!domain) {
+      chrome.action.setBadgeText({ text: "" })
+      return
+    }
+
+    // 检查域名是否匹配的函数
+    const checkDomainMatch = (configDomain: string) => {
+      if (configDomain === domain) return true
+      // 支持通配符匹配，如 *.example.com
+      const pattern = configDomain.replace(/\./g, "\\.").replace(/\*/g, ".*")
+      const regex = new RegExp(`^${pattern}$`)
+      return regex.test(domain)
+    }
+
+    // 查找匹配的域名配置
+    const matched = data.find(({ config }) => checkDomainMatch(config.domain))
+
+    if (matched && matched.accounts.length > 0) {
+      // 显示账户数量
+      const count = matched.accounts.length
+      chrome.action.setBadgeText({
+        text: count > 99 ? "99+" : count.toString()
+      })
+      chrome.action.setBadgeBackgroundColor({ color: "#1677ff" })
+    } else {
+      // 清除角标
+      chrome.action.setBadgeText({ text: "" })
+    }
+  }
+
   useEffect(() => {
     loadData()
   }, [])
 
-  // 当 currentDomain 变化时，更新展开的 key
+  // 当 currentDomain 变化时，更新展开的 key 和角标
   useEffect(() => {
     const hasOtherDomains = domainsWithAccounts.some(
       ({ config }) => !isCurrentDomain(config.domain)
@@ -78,18 +134,54 @@ function IndexPopup() {
     }
   }, [currentDomain, domainsWithAccounts])
 
-  // 获取当前标签页的域名
+  // 获取当前标签页的域名和 favicon
   useEffect(() => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs[0]?.url) {
-        try {
-          const url = new URL(tabs[0].url)
-          setCurrentDomain(url.hostname)
-        } catch (e) {
-          console.error("无法解析URL:", e)
+    const updateTabInfo = () => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]?.url) {
+          try {
+            const url = new URL(tabs[0].url)
+            setCurrentDomain(url.hostname)
+
+            // 获取 favicon
+            if (tabs[0].favIconUrl) {
+              setFaviconUrl(tabs[0].favIconUrl)
+            } else {
+              // 如果没有 favicon，尝试从域名构建 favicon URL
+              const faviconUrl = `${url.protocol}//${url.hostname}/favicon.ico`
+              setFaviconUrl(faviconUrl)
+            }
+          } catch (e) {
+            console.error("无法解析URL:", e)
+          }
         }
+      })
+    }
+
+    updateTabInfo()
+
+    // 监听标签页切换
+    const handleTabActivated = () => {
+      updateTabInfo()
+    }
+
+    // 监听标签页更新（URL变化）
+    const handleTabUpdated = (
+      tabId: number,
+      changeInfo: chrome.tabs.TabChangeInfo
+    ) => {
+      if (changeInfo.url) {
+        updateTabInfo()
       }
-    })
+    }
+
+    chrome.tabs.onActivated.addListener(handleTabActivated)
+    chrome.tabs.onUpdated.addListener(handleTabUpdated)
+
+    return () => {
+      chrome.tabs.onActivated.removeListener(handleTabActivated)
+      chrome.tabs.onUpdated.removeListener(handleTabUpdated)
+    }
   }, [])
 
   const handleAddDomain = () => {
@@ -219,6 +311,84 @@ function IndexPopup() {
     }
   }
 
+  // 导出 JSON
+  const handleExportJson = async () => {
+    try {
+      const data = await exportStorageData()
+      const jsonStr = JSON.stringify(data, null, 2)
+      const blob = new Blob([jsonStr], { type: "application/json" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `password-auto-fill-config-${Date.now()}.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      message.success("导出成功")
+    } catch (error) {
+      console.error("导出失败:", error)
+      message.error("导出失败")
+    }
+  }
+
+  // 导入 JSON
+  const handleImportJson = async (file: File) => {
+    try {
+      const text = await file.text()
+      const data = JSON.parse(text) as StorageData
+
+      // 验证数据结构
+      if (!data.domainConfigs || !Array.isArray(data.domainConfigs)) {
+        throw new Error("无效的配置文件：缺少 domainConfigs")
+      }
+      if (!data.accounts || !Array.isArray(data.accounts)) {
+        throw new Error("无效的配置文件：缺少 accounts")
+      }
+
+      await importStorageData(data)
+      message.success("导入成功")
+      loadData()
+    } catch (error) {
+      console.error("导入失败:", error)
+      message.error(
+        error instanceof Error ? error.message : "导入失败，请检查文件格式"
+      )
+    }
+  }
+
+  // 处理文件选择
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      handleImportJson(file)
+      // 清空 input，以便可以重复选择同一文件
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ""
+      }
+    }
+  }
+
+  // 打开 JSON 编辑器
+  const handleOpenJsonEditor = async () => {
+    const data = await exportStorageData()
+    setStorageData(data)
+    setJsonEditorOpen(true)
+  }
+
+  // 保存 JSON 编辑
+  const handleSaveJson = async (data: StorageData) => {
+    try {
+      await importStorageData(data)
+      message.success("保存成功")
+      loadData()
+      setJsonEditorOpen(false)
+    } catch (error) {
+      console.error("保存失败:", error)
+      message.error("保存失败")
+    }
+  }
+
   // 分离匹配的域名配置和其他域名配置
   const matchedDomain = domainsWithAccounts.find(({ config }) =>
     isCurrentDomain(config.domain)
@@ -236,27 +406,78 @@ function IndexPopup() {
       }}>
       <div className="w-96 h-[600px] bg-gray-50 flex flex-col">
         <div className="bg-purple-500 p-4 text-white flex-shrink-0">
-          {matchedDomain ? (
-            <h1 className="text-xl font-bold">
-              {matchedDomain.config.alias ||
-                matchedDomain.config.domain ||
-                "未检测到域名"}
-            </h1>
-          ) : (
-            <Button
-              type="primary"
-              size="large"
-              block
-              onClick={handleAddDomain}
-              style={{
-                backgroundColor: "rgba(255, 255, 255, 0.2)",
-                borderColor: "rgba(255, 255, 255, 0.3)",
-                color: "white",
-                fontWeight: "bold"
-              }}>
-              + 添加域名
-            </Button>
-          )}
+          <div className="flex items-center justify-between gap-2">
+            {matchedDomain ? (
+              <div className="flex items-center gap-3 flex-1 min-w-0">
+                {faviconUrl && (
+                  <img
+                    src={faviconUrl}
+                    alt="favicon"
+                    className="w-6 h-6 rounded flex-shrink-0"
+                    onError={(e) => {
+                      // 如果图片加载失败，隐藏图片
+                      e.currentTarget.style.display = "none"
+                    }}
+                  />
+                )}
+                <h1 className="text-xl font-bold flex-1 truncate">
+                  {matchedDomain.config.alias ||
+                    matchedDomain.config.domain ||
+                    "未检测到域名"}
+                </h1>
+              </div>
+            ) : (
+              <Button
+                type="primary"
+                size="large"
+                block
+                onClick={handleAddDomain}
+                style={{
+                  backgroundColor: "rgba(255, 255, 255, 0.2)",
+                  borderColor: "rgba(255, 255, 255, 0.3)",
+                  color: "white",
+                  fontWeight: "bold"
+                }}>
+                + 添加域名
+              </Button>
+            )}
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <Tooltip title="导出 JSON">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={handleExportJson}
+                  style={{ color: "white" }}
+                />
+              </Tooltip>
+              <Tooltip title="导入 JSON">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<ImportOutlined />}
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{ color: "white" }}
+                />
+              </Tooltip>
+              <Tooltip title="编辑 JSON">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={handleOpenJsonEditor}
+                  style={{ color: "white" }}
+                />
+              </Tooltip>
+            </div>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            style={{ display: "none" }}
+            onChange={handleFileSelect}
+          />
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-3">
           {domainsWithAccounts.length > 0 ? (
@@ -373,6 +594,12 @@ function IndexPopup() {
         }}
       />
       <SelectorModal ref={selectorModalRef} />
+      <JsonEditorModal
+        open={jsonEditorOpen}
+        onClose={() => setJsonEditorOpen(false)}
+        onSave={handleSaveJson}
+        initialData={storageData}
+      />
     </ConfigProvider>
   )
 }
